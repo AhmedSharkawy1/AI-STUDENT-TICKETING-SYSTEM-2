@@ -1,7 +1,6 @@
 require('dotenv').config();
 const mysql = require('mysql2/promise');
 const bcrypt = require('bcryptjs');
-// Import data from the JS file instead of trying to require a .ts file
 const { complaintsCSV } = require('./data/complaintsData.js');
 
 const dbConfig = {
@@ -31,7 +30,9 @@ const getPool = () => {
 const setupDatabase = async () => {
     let connection;
     try {
-        // If connecting to localhost, try to create the DB.
+        // If connecting to localhost, we attempt to create the DB.
+        // For production/Vercel, we assume the DB and tables are handled by migrations 
+        // or the environment is already set up.
         if (dbConfig.host === 'localhost') {
              const tempConnection = await mysql.createConnection({
                 host: dbConfig.host,
@@ -80,6 +81,7 @@ const setupDatabase = async () => {
         `);
         console.log('Tables checked/created.');
 
+        // Seeding Logic
         const [rows] = await connection.query('SELECT COUNT(*) as count FROM users');
         if (rows[0].count === 0) {
             console.log('No users found. Seeding initial data...');
@@ -108,11 +110,9 @@ const robustCSVParser = (csvString) => {
         record.Ticket_ID = parts[0].trim();
         record.Student_ID = parts[1].trim();
         record.Category = parts[2].trim();
-        // Handle dates that might be at the end
         record.Date_Submitted = parts[parts.length - 3].trim();
         record.Status = parts[parts.length - 4].trim();
         record.Priority = parts[parts.length - 5].trim();
-        // Join remaining parts for complaint text which might contain commas
         record.Complaint_Text = parts.slice(3, parts.length - 5).join(',').replace(/"/g, '').trim();
 
         records.push(record);
@@ -151,8 +151,8 @@ const seedData = async (connection) => {
         if (allUsers.length > 0) {
              const userMap = new Map(allUsers.map(u => [u[0], { id: u[0], name: u[1] }]));
              
-             // Batch insert users
-             const userChunkSize = 1000;
+             // Chunk users insert to avoid packet too large errors
+             const userChunkSize = 200;
              for (let i = 0; i < allUsers.length; i += userChunkSize) {
                  const chunk = allUsers.slice(i, i + userChunkSize);
                  await connection.query('INSERT INTO users (id, name, email, password, role, major, departmentName, age) VALUES ?', [chunk]);
@@ -171,6 +171,7 @@ const seedData = async (connection) => {
                 let complaintStatus = 'Open';
                 if (record.Status === 'Resolved' || record.Status === 'Closed') complaintStatus = 'Closed';
                 else if (record.Status === 'Reopened') complaintStatus = 'Reopened';
+                else if (record.Status === 'In Progress') complaintStatus = 'Open'; // Normalize "In Progress" to "Open" for simplicity or keep if enum allows
                 
                 const dateParts = record.Date_Submitted.split('/');
                 let mysqlDateTime;
@@ -208,7 +209,8 @@ const seedData = async (connection) => {
             });
 
             if (complaintsToSeed.length > 0) {
-                const chunkSize = 500;
+                // Chunk complaints insert
+                const chunkSize = 200;
                 for (let i = 0; i < complaintsToSeed.length; i += chunkSize) {
                     const chunk = complaintsToSeed.slice(i, i + chunkSize);
                     await connection.query('INSERT INTO complaints (id, studentId, studentName, department, complaintText, status, priority, createdAt, resolvedAt, solutionText, aiRecommendation) VALUES ?', [chunk]);
