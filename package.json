@@ -1,0 +1,14 @@
+{
+  "name": "ai-university-ticketing-system",
+  "version": "1.0.0",
+  "scripts": {
+    "install-client": "cd client && npm install",
+    "install-server": "cd server && npm install",
+    "build-client": "cd client && npm run build",
+    "install": "npm run install-client && npm run install-server",
+    "build": "npm run build-client"
+  },
+  "engines": {
+    "node": "18.x"
+  }
+}
