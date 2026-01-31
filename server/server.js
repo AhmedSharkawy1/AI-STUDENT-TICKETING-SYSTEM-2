@@ -55,8 +55,7 @@ const authenticateToken = (req, res, next) => {
 let hfClassifier = null;
 
 // Only load local models if NOT running on Vercel. 
-// Vercel serverless functions have size limits (50MB) and read-only file systems 
-// which makes loading local heavy models difficult and error-prone.
+// Vercel serverless functions have size limits (50MB) and read-only file systems.
 if (!process.env.VERCEL) {
     import('@xenova/transformers').then(transformers => {
         console.log('Hugging Face Transformers.js library loaded.');
@@ -129,10 +128,8 @@ const generateJsonGeminiResponse = async (prompt, schema) => {
 
 // Check DB Connection on startup (Lazy load for Serverless)
 app.use(async (req, res, next) => {
-    // In serverless, we might need to ensure DB setup is triggered if containers are recycled
-    // However, setupDatabase checks IF NOT EXISTS, so it's safe to call, but to save time 
-    // on every request, we assume the initial deployment hook or local dev handles it.
-    // For this demo, we'll keep it lightweight.
+    // In serverless, we generally assume DB setup is handled by migration scripts 
+    // or external processes, but for this demo, we perform a lightweight check if needed.
     next();
 });
 
@@ -288,4 +285,116 @@ app.put('/api/complaints/:id', authenticateToken, async (req, res) => {
         const [result] = await pool.query('UPDATE complaints SET ? WHERE id = ?', [updates, id]);
         
         if (result.affectedRows === 0) {
-            return
+            return res.status(404).json({ message: 'Complaint not found.' });
+        }
+
+        const [updatedRows] = await pool.query('SELECT * FROM complaints WHERE id = ?', [id]);
+        res.json(updatedRows[0]);
+    } catch (error) {
+        console.error(`Error updating complaint ${id}:`, error);
+        res.status(500).json({ message: 'Failed to update complaint.' });
+    }
+});
+
+// AI Endpoints
+app.post('/api/ai/suggest-department', authenticateToken, async (req, res) => {
+    const { complaintText } = req.body;
+    if (!complaintText) {
+        return res.status(400).json({ message: 'complaintText is required.' });
+    }
+
+    // 1. Try Local BERT Classifier first (if loaded)
+    if (hfClassifier) {
+        try {
+            console.log("Using local BERT classifier for department suggestion.");
+            const output = await hfClassifier(complaintText, { topk: 1 });
+            const topResult = output[0];
+            const department = LABEL_TO_DEPARTMENT[topResult.label];
+            
+            if (department) {
+                const suggestion = {
+                    department: department,
+                    reason: `AI classified this for ${department} (Local Model Confidence: ${Math.round(topResult.score * 100)}%).`
+                };
+                return res.json(suggestion);
+            }
+        } catch(error) {
+            console.warn("Local BERT classifier error, attempting fallback:", error.message);
+        }
+    }
+    
+    // 2. Fallback to Gemini (Cloud)
+    try {
+        if (!API_KEY) throw new Error("No API Key");
+        console.log("Using Gemini for department suggestion (Fallback).");
+        const prompt = `Analyze the following student complaint to determine the most relevant department and provide a brief reason. Analyze the language of the complaint (e.g., Arabic or English) and provide your reason in that SAME language. The available departments are: "${DEPARTMENTS.join('", "')}".
+    
+Complaint: "${complaintText}"
+    
+Respond in JSON format with "department" and "reason" keys.`;
+        const departmentSchema = { type: Type.OBJECT, properties: { department: { type: Type.STRING, enum: DEPARTMENTS }, reason: { type: Type.STRING } } };
+
+        const suggestion = await generateJsonGeminiResponse(prompt, departmentSchema);
+        res.json(suggestion);
+    } catch(error) {
+        console.error("All AI suggestion methods failed:", error.message);
+        res.status(200).json({ 
+            department: DEPARTMENTS[3], // Default to Student Affairs
+            reason: "AI suggestion unavailable. Defaulting to general support." 
+        });
+    }
+});
+
+
+app.post('/api/complaints/:id/generate-solution', authenticateToken, async (req, res) => {
+    const { complaintText, department } = req.body;
+    const prompt = `You are an AI assistant for a university help desk staff member in the "${department}" department. Your task is to write a polite, professional, and empathetic response to a student's complaint. The response should acknowledge their issue and suggest a clear solution or next step. Analyze the language of the original complaint (e.g., Arabic or English) and write your entire response in that SAME language.
+
+Student's Complaint: "${complaintText}"
+    
+Draft of Solution for Student:`;
+    try {
+        const solution = await generateGeminiResponse(prompt, true);
+        res.json({ solutionText: solution });
+    } catch(error) {
+        res.status(500).json({ message: "Failed to generate AI solution." });
+    }
+});
+
+app.post('/api/complaints/:id/generate-student-recommendation', authenticateToken, async (req, res) => {
+    const { complaintText, solutionText } = req.body;
+    const prompt = `You are an impartial AI student advocate. Your task is to analyze a student's complaint and the solution provided by the university staff. Provide a concise recommendation to the student on whether the solution is adequate or if they should consider reopening the ticket. Analyze the language of the original complaint (e.g., Arabic or English) and write your entire response in that SAME language.
+
+Original Complaint: "${complaintText}"
+Staff's Solution: "${solutionText}"
+    
+AI Advice for Student:`;
+    try {
+        const recommendation = await generateGeminiResponse(prompt, true);
+        res.json({ recommendationText: recommendation });
+    } catch(error) {
+        res.status(500).json({ message: "Failed to generate AI advice." });
+    }
+});
+
+
+// --- START SERVER (Adapted for Vercel) ---
+// If running directly (node server.js), start listening.
+// If running on Vercel, export the app.
+if (require.main === module) {
+    const startServer = async () => {
+        await setupDatabase();
+        const PORT = process.env.PORT || 3009;
+        app.listen(PORT, () => {
+            console.log(`🚀 Server is running on http://localhost:${PORT}`);
+            console.log('--------------------------------');
+            console.log(`AI Configuration:`);
+            console.log(`- API Key Status: ${API_KEY ? 'Present' : 'Missing (AI Features Disabled)'}`);
+            console.log(`- Local BERT Model: ${hfClassifier ? 'Loaded' : 'Loading/Unavailable'}`);
+            console.log('--------------------------------');
+        });
+    };
+    startServer();
+}
+
+module.exports = app;
