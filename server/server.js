@@ -19,8 +19,6 @@ if (!API_KEY) {
 }
 
 // Initialize Gemini
-// Note: We create the client, but we will handle the API key inside the helper functions
-// to support scenarios where it might be missing nicely.
 const ai = new GoogleGenAI({ apiKey: API_KEY || "dummy_key" });
 
 const DEPARTMENTS = [
@@ -97,9 +95,6 @@ const generateJsonGeminiResponse = async (prompt, schema) => {
 
 // Check DB Connection on startup (Lazy load for Serverless)
 app.use(async (req, res, next) => {
-    // In serverless, we generally assume DB setup is handled by migration scripts 
-    // or external processes, but for this demo, we perform a lightweight check if needed.
-    // If running strictly as serverless, avoid heavy operations here.
     next();
 });
 
@@ -228,7 +223,6 @@ Complaint: "${complaintText}"`;
 Student Complaint: "${complaintText}"
                 
 Actionable Recommendation for Staff:`;
-                // Use thinking for better reasoning on recommendations if available, else just standard generation
                 aiRecommendation = await generateGeminiResponse(recommendationPrompt, false);
             }
         } catch (aiError) {
@@ -328,8 +322,6 @@ AI Advice for Student:`;
 
 
 // --- START SERVER (Adapted for Vercel) ---
-// If running directly (node server.js), start listening.
-// If running on Vercel, export the app.
 if (require.main === module) {
     const startServer = async () => {
         await setupDatabase();

@@ -12,14 +12,29 @@ const getAuthHeaders = () => {
 
 const handleResponse = async (response: Response) => {
     if (response.status === 401 || response.status === 403) {
-        // Automatically handle token expiration/invalidation
         throw new Error('Unauthorized');
     }
-    const data = await response.json();
-    if (!response.ok) {
-        throw new Error(data.message || 'An API error occurred');
+    
+    const text = await response.text();
+    
+    if (!text) {
+        return null; // Handle empty responses gracefully
     }
-    return data;
+
+    try {
+        const data = JSON.parse(text);
+        if (!response.ok) {
+            throw new Error(data.message || `API Error: ${response.statusText}`);
+        }
+        return data;
+    } catch (e) {
+        console.error("Failed to parse response JSON:", text.substring(0, 200)); 
+        if (!response.ok) {
+             throw new Error(`API Error (${response.status}): ${text.substring(0, 100)}`);
+        }
+        // If status is OK but parsing failed, it might be a format issue (e.g. 'true' vs json)
+        throw new Error('Invalid JSON response from server');
+    }
 };
 
 // --- Auth ---
@@ -44,7 +59,7 @@ export const signupUser = async (userData: Omit<User, 'id'>): Promise<User> => {
 // --- Users ---
 export const fetchUsers = async (): Promise<User[]> => {
     const response = await fetch(`${API_BASE_URL}/users`, { headers: getAuthHeaders() });
-    return handleResponse(response);
+    return handleResponse(response) || [];
 };
 
 export const updateUserProfile = async (userData: Partial<User>): Promise<User> => {
@@ -59,7 +74,7 @@ export const updateUserProfile = async (userData: Partial<User>): Promise<User> 
 // --- Complaints ---
 export const fetchComplaints = async (): Promise<Complaint[]> => {
     const response = await fetch(`${API_BASE_URL}/complaints`, { headers: getAuthHeaders() });
-    return handleResponse(response);
+    return handleResponse(response) || [];
 };
 
 export const createComplaint = async (complaintData: Partial<Complaint>): Promise<Complaint> => {

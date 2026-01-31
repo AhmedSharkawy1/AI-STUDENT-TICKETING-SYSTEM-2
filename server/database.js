@@ -31,8 +31,6 @@ const setupDatabase = async () => {
     let connection;
     try {
         // If connecting to localhost, we attempt to create the DB.
-        // For production/Vercel, we assume the DB and tables are handled by migrations 
-        // or the environment is already set up.
         if (dbConfig.host === 'localhost') {
              const tempConnection = await mysql.createConnection({
                 host: dbConfig.host,
