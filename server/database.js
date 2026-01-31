@@ -1,6 +1,7 @@
 require('dotenv').config();
 const mysql = require('mysql2/promise');
 const bcrypt = require('bcryptjs');
+// Import data from the JS file instead of trying to require a .ts file
 const { complaintsCSV } = require('./data/complaintsData.js');
 
 const dbConfig = {
@@ -13,7 +14,6 @@ const dbConfig = {
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0,
-    // Enable SSL for cloud databases (PlanetScale, Aiven, etc.) if configured
     ssl: process.env.DB_SSL === 'true' ? {
         rejectUnauthorized: false
     } : undefined
@@ -31,8 +31,7 @@ const getPool = () => {
 const setupDatabase = async () => {
     let connection;
     try {
-        // If connecting to localhost, we might try to create the DB.
-        // For Cloud DBs on Vercel, assume the DB exists or use migration scripts separately.
+        // If connecting to localhost, try to create the DB.
         if (dbConfig.host === 'localhost') {
              const tempConnection = await mysql.createConnection({
                 host: dbConfig.host,
@@ -44,7 +43,6 @@ const setupDatabase = async () => {
             await tempConnection.end();
         }
 
-        // Now get a connection from the pool
         const pool = getPool();
         connection = await pool.getConnection();
         console.log('Successfully connected to the database pool.');
@@ -82,7 +80,6 @@ const setupDatabase = async () => {
         `);
         console.log('Tables checked/created.');
 
-        // Only seed if empty
         const [rows] = await connection.query('SELECT COUNT(*) as count FROM users');
         if (rows[0].count === 0) {
             console.log('No users found. Seeding initial data...');
@@ -91,21 +88,19 @@ const setupDatabase = async () => {
         
     } catch (error) {
         console.error('Database setup failed:', error);
-        // Do not exit process in serverless, just log error.
-        // process.exit(1); 
     } finally {
         if (connection) connection.release();
     }
 };
 
 const robustCSVParser = (csvString) => {
+    if (!csvString) return [];
     const lines = csvString.trim().split('\n');
     const records = [];
     for (let i = 1; i < lines.length; i++) {
         const line = lines[i];
         if (!line.trim()) continue;
 
-        // More robust parsing for complaints that might contain commas
         const parts = line.split(',');
         if (parts.length < 7) continue;
 
@@ -113,9 +108,11 @@ const robustCSVParser = (csvString) => {
         record.Ticket_ID = parts[0].trim();
         record.Student_ID = parts[1].trim();
         record.Category = parts[2].trim();
+        // Handle dates that might be at the end
         record.Date_Submitted = parts[parts.length - 3].trim();
         record.Status = parts[parts.length - 4].trim();
         record.Priority = parts[parts.length - 5].trim();
+        // Join remaining parts for complaint text which might contain commas
         record.Complaint_Text = parts.slice(3, parts.length - 5).join(',').replace(/"/g, '').trim();
 
         records.push(record);
@@ -147,14 +144,19 @@ const seedData = async (connection) => {
             'student',
             'Computer Science',
             null,
-            20 + (index % 5) // Assign ages 20-24
+            20 + (index % 5)
         ]));
 
         const allUsers = [...departmentUsers, ...studentUsers];
-        // Only insert if users list is not empty
         if (allUsers.length > 0) {
              const userMap = new Map(allUsers.map(u => [u[0], { id: u[0], name: u[1] }]));
-             await connection.query('INSERT INTO users (id, name, email, password, role, major, departmentName, age) VALUES ?', [allUsers]);
+             
+             // Batch insert users
+             const userChunkSize = 1000;
+             for (let i = 0; i < allUsers.length; i += userChunkSize) {
+                 const chunk = allUsers.slice(i, i + userChunkSize);
+                 await connection.query('INSERT INTO users (id, name, email, password, role, major, departmentName, age) VALUES ?', [chunk]);
+             }
              console.log(`${allUsers.length} users seeded.`);
              
              const complaintsToSeed = [];
@@ -171,12 +173,22 @@ const seedData = async (connection) => {
                 else if (record.Status === 'Reopened') complaintStatus = 'Reopened';
                 
                 const dateParts = record.Date_Submitted.split('/');
-                if (dateParts.length !== 3) return;
+                let mysqlDateTime;
+                let resolvedAt = null;
+
+                if (dateParts.length === 3) {
+                    const jsDate = new Date(parseInt(dateParts[2]), parseInt(dateParts[1]) - 1, parseInt(dateParts[0]));
+                    if (!isNaN(jsDate.getTime())) {
+                        mysqlDateTime = jsDate.toISOString().slice(0, 19).replace('T', ' ');
+                        if (complaintStatus === 'Closed') {
+                             resolvedAt = new Date(jsDate.getTime() + 3 * 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ');
+                        }
+                    }
+                }
                 
-                // Correctly parse DD/MM/YYYY format
-                const jsDate = new Date(parseInt(dateParts[2]), parseInt(dateParts[1]) - 1, parseInt(dateParts[0]));
-                if (isNaN(jsDate.getTime())) return;
-                const mysqlDateTime = jsDate.toISOString().slice(0, 19).replace('T', ' ');
+                if (!mysqlDateTime) {
+                    mysqlDateTime = new Date().toISOString().slice(0, 19).replace('T', ' ');
+                }
 
                 const complaint = [
                     ticketId,
@@ -187,7 +199,7 @@ const seedData = async (connection) => {
                     complaintStatus,
                     record.Priority,
                     mysqlDateTime,
-                    complaintStatus === 'Closed' ? new Date(jsDate.getTime() + 3 * 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ') : null,
+                    resolvedAt,
                     complaintStatus === 'Closed' ? 'The issue has been addressed and resolved by our team.' : '',
                     'Review the student\'s issue and provide a detailed update or solution.'
                 ];
@@ -196,8 +208,7 @@ const seedData = async (connection) => {
             });
 
             if (complaintsToSeed.length > 0) {
-                // Chunking inserts to avoid packet size limits in cloud DBs
-                const chunkSize = 100;
+                const chunkSize = 500;
                 for (let i = 0; i < complaintsToSeed.length; i += chunkSize) {
                     const chunk = complaintsToSeed.slice(i, i + chunkSize);
                     await connection.query('INSERT INTO complaints (id, studentId, studentName, department, complaintText, status, priority, createdAt, resolvedAt, solutionText, aiRecommendation) VALUES ?', [chunk]);
@@ -209,6 +220,5 @@ const seedData = async (connection) => {
         console.error("Seeding failed", err);
     }
 };
-
 
 module.exports = { pool: getPool(), setupDatabase };
