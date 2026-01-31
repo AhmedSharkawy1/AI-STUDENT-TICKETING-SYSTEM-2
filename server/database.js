@@ -8,7 +8,7 @@ const dbConfig = {
     user: process.env.DB_USER || 'root',
     password: process.env.DB_PASSWORD || '',
     database: process.env.DB_NAME || 'ai_helpdesk2',
-    port: process.env.DB_PORT || 3306,
+    port: process.env.DB_PORT ? parseInt(process.env.DB_PORT) : 3306,
     charset: 'utf8mb4',
     waitForConnections: true,
     connectionLimit: 10,
@@ -19,6 +19,7 @@ const dbConfig = {
 };
 
 let pool;
+let isInitialized = false;
 
 const getPool = () => {
     if (!pool) {
@@ -30,16 +31,20 @@ const getPool = () => {
 const setupDatabase = async () => {
     let connection;
     try {
-        // If connecting to localhost, we attempt to create the DB.
+        // Attempt to create DB if local, otherwise assume it exists or connection will fail gracefully
         if (dbConfig.host === 'localhost') {
-             const tempConnection = await mysql.createConnection({
-                host: dbConfig.host,
-                user: dbConfig.user,
-                password: dbConfig.password,
-                charset: dbConfig.charset,
-            });
-            await tempConnection.query(`CREATE DATABASE IF NOT EXISTS \`${dbConfig.database}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
-            await tempConnection.end();
+             try {
+                const tempConnection = await mysql.createConnection({
+                    host: dbConfig.host,
+                    user: dbConfig.user,
+                    password: dbConfig.password,
+                    charset: dbConfig.charset,
+                });
+                await tempConnection.query(`CREATE DATABASE IF NOT EXISTS \`${dbConfig.database}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
+                await tempConnection.end();
+             } catch (e) {
+                 console.warn("Could not create database (might already exist or permission denied):", e.message);
+             }
         }
 
         const pool = getPool();
@@ -88,9 +93,16 @@ const setupDatabase = async () => {
         
     } catch (error) {
         console.error('Database setup failed:', error);
+        throw error; // Re-throw to be caught by initDB or caller
     } finally {
         if (connection) connection.release();
     }
+};
+
+const initDB = async () => {
+    if (isInitialized) return;
+    await setupDatabase();
+    isInitialized = true;
 };
 
 const robustCSVParser = (csvString) => {
@@ -111,7 +123,8 @@ const robustCSVParser = (csvString) => {
         record.Date_Submitted = parts[parts.length - 3].trim();
         record.Status = parts[parts.length - 4].trim();
         record.Priority = parts[parts.length - 5].trim();
-        record.Complaint_Text = parts.slice(3, parts.length - 5).join(',').replace(/"/g, '').trim();
+        // Join remaining parts for complaint text which might contain commas, remove quotes
+        record.Complaint_Text = parts.slice(3, parts.length - 5).join(',').replace(/^"|"$/g, '').trim();
 
         records.push(record);
     }
@@ -149,7 +162,7 @@ const seedData = async (connection) => {
         if (allUsers.length > 0) {
              const userMap = new Map(allUsers.map(u => [u[0], { id: u[0], name: u[1] }]));
              
-             // Chunk users insert to avoid packet too large errors
+             // Chunk users insert
              const userChunkSize = 200;
              for (let i = 0; i < allUsers.length; i += userChunkSize) {
                  const chunk = allUsers.slice(i, i + userChunkSize);
@@ -169,13 +182,14 @@ const seedData = async (connection) => {
                 let complaintStatus = 'Open';
                 if (record.Status === 'Resolved' || record.Status === 'Closed') complaintStatus = 'Closed';
                 else if (record.Status === 'Reopened') complaintStatus = 'Reopened';
-                else if (record.Status === 'In Progress') complaintStatus = 'Open'; // Normalize "In Progress" to "Open" for simplicity or keep if enum allows
+                else if (record.Status === 'In Progress') complaintStatus = 'Open';
                 
                 const dateParts = record.Date_Submitted.split('/');
                 let mysqlDateTime;
                 let resolvedAt = null;
 
                 if (dateParts.length === 3) {
+                    // Assuming DD/MM/YYYY
                     const jsDate = new Date(parseInt(dateParts[2]), parseInt(dateParts[1]) - 1, parseInt(dateParts[0]));
                     if (!isNaN(jsDate.getTime())) {
                         mysqlDateTime = jsDate.toISOString().slice(0, 19).replace('T', ' ');
@@ -207,7 +221,6 @@ const seedData = async (connection) => {
             });
 
             if (complaintsToSeed.length > 0) {
-                // Chunk complaints insert
                 const chunkSize = 200;
                 for (let i = 0; i < complaintsToSeed.length; i += chunkSize) {
                     const chunk = complaintsToSeed.slice(i, i + chunkSize);
@@ -221,4 +234,4 @@ const seedData = async (connection) => {
     }
 };
 
-module.exports = { pool: getPool(), setupDatabase };
+module.exports = { pool: getPool(), setupDatabase, initDB };

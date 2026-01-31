@@ -4,7 +4,7 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { GoogleGenAI, Type } = require("@google/genai");
-const { pool, setupDatabase } = require('./database');
+const { pool, initDB } = require('./database');
 
 // --- INITIALIZATION ---
 const app = express();
@@ -41,6 +41,20 @@ const authenticateToken = (req, res, next) => {
         next();
     });
 };
+
+// Check DB Connection on startup (Lazy load for Serverless)
+app.use(async (req, res, next) => {
+    try {
+        await initDB();
+        next();
+    } catch (error) {
+        console.error("Critical Database Initialization Error:", error);
+        res.status(500).json({ 
+            message: "Database connection failed", 
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined 
+        });
+    }
+});
 
 // --- HELPER FUNCTIONS (Gemini API Calls) ---
 const generateGeminiResponse = async (prompt, useThinking = false) => {
@@ -93,11 +107,6 @@ const generateJsonGeminiResponse = async (prompt, schema) => {
 
 // --- API ENDPOINTS ---
 
-// Check DB Connection on startup (Lazy load for Serverless)
-app.use(async (req, res, next) => {
-    next();
-});
-
 // AUTH
 app.post('/api/auth/login', async (req, res) => {
     const { email, password, role } = req.body;
@@ -114,7 +123,7 @@ app.post('/api/auth/login', async (req, res) => {
         }
     } catch (error) {
         console.error('Login Error:', error);
-        res.status(500).json({ message: 'Internal server error' });
+        res.status(500).json({ message: 'Internal server error during login' });
     }
 });
 
@@ -135,7 +144,7 @@ app.post('/api/auth/signup', async (req, res) => {
         res.status(201).json(userToReturn);
     } catch (error) {
         console.error('Signup Error:', error);
-        res.status(500).json({ message: 'Internal server error' });
+        res.status(500).json({ message: 'Internal server error during signup' });
     }
 });
 
@@ -145,7 +154,8 @@ app.get('/api/users', authenticateToken, async (req, res) => {
         const [users] = await pool.query('SELECT id, name, email, role, major, departmentName, age FROM users');
         res.json(users);
     } catch (error) {
-        res.status(500).json({ message: 'Internal server error' });
+        console.error('Fetch users error:', error);
+        res.status(500).json({ message: 'Internal server error fetching users' });
     }
 });
 
@@ -177,7 +187,7 @@ app.put('/api/users/profile', authenticateToken, async (req, res) => {
 
     } catch (error) {
         console.error("Profile update error:", error);
-        res.status(500).json({ message: 'Internal server error' });
+        res.status(500).json({ message: 'Internal server error updating profile' });
     }
 });
 
@@ -188,7 +198,8 @@ app.get('/api/complaints', authenticateToken, async (req, res) => {
         const [complaints] = await pool.query('SELECT * FROM complaints ORDER BY createdAt DESC');
         res.json(complaints);
     } catch (error) {
-        res.status(500).json({ message: 'Internal server error' });
+        console.error('Fetch complaints error:', error);
+        res.status(500).json({ message: 'Internal server error fetching complaints' });
     }
 });
 
@@ -324,7 +335,15 @@ AI Advice for Student:`;
 // --- START SERVER (Adapted for Vercel) ---
 if (require.main === module) {
     const startServer = async () => {
-        await setupDatabase();
+        // In local dev, we might still want to call this explicitly, 
+        // though the middleware handles it too. 
+        // It's safe due to isInitialized check.
+        try {
+            await initDB();
+        } catch (e) {
+            console.error("Initial DB setup failed:", e);
+        }
+        
         const PORT = process.env.PORT || 3009;
         app.listen(PORT, () => {
             console.log(`🚀 Server is running on http://localhost:${PORT}`);
