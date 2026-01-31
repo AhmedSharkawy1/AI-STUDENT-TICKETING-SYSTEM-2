@@ -9,6 +9,6 @@
     "build": "npm run build-client"
   },
   "engines": {
-    "node": "18.x"
+    "node": "20.x"
   }
 }
